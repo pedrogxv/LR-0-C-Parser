@@ -11,243 +11,349 @@
 #include <stdexcept>
 using namespace std;
 
-struct Production {
-    string lhs;
-    vector<string> rhs;
+// estrutura para representar uma producao da gramatica: A -> alfa
+struct Producao {
+    string lado_esquerdo;  // nao-terminal do lado esquerdo
+    vector<string> lado_direito;  // simbolos do lado direito
 };
 
+// item lr(0): [A -> alfa . beta] representado por indice da producao e posicao do ponto
 struct Item {
-    int prod; // production index
-    int dot;  // position of dot (0..rhs.size())
-    bool operator==(Item const &o) const { return prod==o.prod && dot==o.dot; }
+    int indice_producao;  // qual producao (indice no vetor de producoes)
+    int posicao_ponto;    // posicao do ponto (0..tamanho do lado direito)
+    bool operator==(Item const &outro) const { 
+        return indice_producao == outro.indice_producao && posicao_ponto == outro.posicao_ponto; 
+    }
 };
 
-struct ItemHash { size_t operator()(Item const &it) const noexcept { return (it.prod<<16) ^ it.dot; } };
+// funcao hash para usar Item em unordered_set
+struct ItemHash { 
+    size_t operator()(Item const &item) const noexcept { 
+        return (item.indice_producao << 16) ^ item.posicao_ponto; 
+    } 
+};
 
-using State = vector<Item>;
+// estado do automato lr(0) = conjunto de items
+using Estado = vector<Item>;;
 
-static string join(const vector<string>& v, const string &sep=" "){
-    string s;
-    for(size_t i=0;i<v.size();++i){ if(i) s+=sep; s+=v[i]; }
-    return s;
+// funcao auxiliar para juntar strings com separador
+static string juntar_strings(const vector<string>& vetor, const string &separador=" "){
+    string resultado;
+    for(size_t i=0; i<vetor.size(); ++i){ 
+        if(i) resultado += separador; 
+        resultado += vetor[i]; 
+    }
+    return resultado;
 }
 
-// read grammar file
-vector<Production> read_grammar(const string &path, set<string> &nonterminals, set<string> &terminals){
-    ifstream in(path);
-    if(!in) throw runtime_error("Could not open grammar file: " + path);
-    vector<Production> prods;
-    string line;
-    while(getline(in,line)){
-        // strip comments after #
-        auto posc = line.find('#');
-        if(posc!=string::npos) line = line.substr(0,posc);
-        // trim
-        auto trim = [](string s){
-            size_t a = s.find_first_not_of(" \t\r\n");
-            if(a==string::npos) return string();
-            size_t b = s.find_last_not_of(" \t\r\n");
-            return s.substr(a,b-a+1);
-        };
-        line = trim(line);
-        if(line.empty()) continue;
-        // expect format: A -> alpha | beta
-        auto arrow = line.find("->");
-        if(arrow==string::npos) throw runtime_error("Invalid production (missing ->): " + line);
-        string lhs = trim(line.substr(0,arrow));
-        nonterminals.insert(lhs);
-        string rest = line.substr(arrow+2);
-        // split alternatives by | 
-        stringstream ss(rest);
-        string alt;
-        vector<string> alts;
-        // manual split by | because tokens might have spaces
-        size_t start = 0;
-        while(start < rest.size()){
-            size_t bar = rest.find('|', start);
-            if(bar==string::npos){ alts.push_back(trim(rest.substr(start))); break; }
-            alts.push_back(trim(rest.substr(start, bar-start)));
-            start = bar+1;
-        }
-        for(auto &a: alts){
-            Production p;
-            p.lhs = lhs;
-            // split a by spaces
-            stringstream s2(a);
-            string tok;
-            while(s2 >> tok){
-                if(tok=="eps") continue; // epsilon
-                p.rhs.push_back(tok);
+// le arquivo da gramatica e retorna vetor de producoes
+vector<Producao> ler_gramatica(const string &caminho_arquivo, set<string> &nao_terminais, set<string> &terminais){
+    ifstream arquivo(caminho_arquivo);
+    if(!arquivo) throw runtime_error("nao foi possivel abrir arquivo da gramatica: " + caminho_arquivo);
+    
+    vector<Producao> producoes;
+    string linha;
+    
+    // funcao auxiliar para remover espacos em branco
+    auto remover_espacos = [](string texto){
+        size_t inicio = texto.find_first_not_of(" \t\r\n");
+        if(inicio == string::npos) return string();
+        size_t fim = texto.find_last_not_of(" \t\r\n");
+        return texto.substr(inicio, fim - inicio + 1);
+    };
+    
+    while(getline(arquivo, linha)){
+        // remove comentarios apos #
+        auto pos_comentario = linha.find('#');
+        if(pos_comentario != string::npos) linha = linha.substr(0, pos_comentario);
+        
+        linha = remover_espacos(linha);
+        if(linha.empty()) continue;
+        
+        // formato esperado: A -> alfa | beta
+        auto pos_seta = linha.find("->");
+        if(pos_seta == string::npos) 
+            throw runtime_error("producao invalida (falta ->): " + linha);
+        
+        string lado_esq = remover_espacos(linha.substr(0, pos_seta));
+        nao_terminais.insert(lado_esq);
+        
+        string resto = linha.substr(pos_seta + 2);
+        
+        // divide alternativas pelo simbolo |
+        vector<string> alternativas;
+        size_t inicio = 0;
+        while(inicio < resto.size()){
+            size_t pos_barra = resto.find('|', inicio);
+            if(pos_barra == string::npos){ 
+                alternativas.push_back(remover_espacos(resto.substr(inicio))); 
+                break; 
             }
-            prods.push_back(p);
+            alternativas.push_back(remover_espacos(resto.substr(inicio, pos_barra - inicio)));
+            inicio = pos_barra + 1;
+        }
+        
+        // cria uma producao para cada alternativa
+        for(auto &alternativa: alternativas){
+            Producao prod;
+            prod.lado_esquerdo = lado_esq;
+            
+            // divide os simbolos do lado direito por espacos
+            stringstream stream(alternativa);
+            string simbolo;
+            while(stream >> simbolo){
+                if(simbolo == "eps") continue;  // epsilon (producao vazia)
+                prod.lado_direito.push_back(simbolo);
+            }
+            producoes.push_back(prod);
         }
     }
-    // collect terminals: any symbol that is not a nonterminal
-    for(auto &p: prods){
-        for(auto &s: p.rhs) if(nonterminals.count(s)==0) terminals.insert(s);
+    
+    // coleta terminais: simbolos que aparecem mas nao sao nao-terminais
+    for(auto &prod: producoes){
+        for(auto &simbolo: prod.lado_direito) {
+            if(nao_terminais.count(simbolo) == 0) 
+                terminais.insert(simbolo);
+        }
     }
-    terminals.insert("$");
-    return prods;
+    terminais.insert("$");  // simbolo de fim de entrada
+    return producoes;
 }
 
-// Item helpers
-string symbol_after_dot(const Item &it, const vector<Production> &prods){
-    const auto &p = prods[it.prod];
-    if(it.dot < (int)p.rhs.size()) return p.rhs[it.dot];
+// retorna o simbolo apos o ponto no item, ou string vazia se ponto esta no final
+string simbolo_apos_ponto(const Item &item, const vector<Producao> &producoes){
+    const auto &prod = producoes[item.indice_producao];
+    if(item.posicao_ponto < (int)prod.lado_direito.size()) 
+        return prod.lado_direito[item.posicao_ponto];
     return string();
 }
 
-bool is_dot_at_end(const Item &it, const vector<Production> &prods){
-    return it.dot >= (int)prods[it.prod].rhs.size();
+// verifica se o ponto esta no final do item (item completo)
+bool ponto_no_final(const Item &item, const vector<Producao> &producoes){
+    return item.posicao_ponto >= (int)producoes[item.indice_producao].lado_direito.size();
 }
 
-// closure
-State closure(const State &I, const vector<Production> &prods, const set<string> &nonterminals){
-    unordered_set<Item, ItemHash> C(I.begin(), I.end());
-    queue<Item> q;
-    for(auto &it: I) q.push(it);
-    while(!q.empty()){
-        Item it = q.front(); q.pop();
-        string a = symbol_after_dot(it, prods);
-        if(a.empty()) continue;
-        if(nonterminals.count(a)==0) continue;
-        // for each production A -> gamma, add [A -> . gamma]
-        for(int i=0;i<(int)prods.size();++i){
-            if(prods[i].lhs == a){
-                Item nit{i,0};
-                if(!C.count(nit)) { C.insert(nit); q.push(nit); }
+// calcula o fechamento (closure) de um conjunto de items
+// adiciona todos os items [B -> .gama] onde B aparece apos o ponto em algum item
+Estado calcular_fechamento(const Estado &conjunto_items, const vector<Producao> &producoes, 
+                           const set<string> &nao_terminais){
+    unordered_set<Item, ItemHash> conjunto_fechamento(conjunto_items.begin(), conjunto_items.end());
+    queue<Item> fila;
+    
+    for(auto &item: conjunto_items) fila.push(item);
+    
+    while(!fila.empty()){
+        Item item_atual = fila.front(); 
+        fila.pop();
+        
+        string simbolo = simbolo_apos_ponto(item_atual, producoes);
+        if(simbolo.empty()) continue;  // ponto no final
+        if(nao_terminais.count(simbolo) == 0) continue;  // nao e nao-terminal
+        
+        // para cada producao B -> gama onde B = simbolo, adiciona [B -> .gama]
+        for(int i=0; i<(int)producoes.size(); ++i){
+            if(producoes[i].lado_esquerdo == simbolo){
+                Item novo_item{i, 0};
+                if(!conjunto_fechamento.count(novo_item)) { 
+                    conjunto_fechamento.insert(novo_item); 
+                    fila.push(novo_item); 
+                }
             }
         }
     }
-    State out(C.begin(), C.end());
-    // sort deterministically
-    sort(out.begin(), out.end(), [](const Item &x, const Item &y){ if(x.prod!=y.prod) return x.prod < y.prod; return x.dot < y.dot; });
-    return out;
+    
+    Estado resultado(conjunto_fechamento.begin(), conjunto_fechamento.end());
+    
+    // ordena deterministicamente para comparacao de estados
+    sort(resultado.begin(), resultado.end(), [](const Item &x, const Item &y){ 
+        if(x.indice_producao != y.indice_producao) return x.indice_producao < y.indice_producao; 
+        return x.posicao_ponto < y.posicao_ponto; 
+    });
+    
+    return resultado;
 }
 
-// goto(I, X)
-State go_to(const State &I, const string &X, const vector<Production> &prods, const set<string> &nonterminals){
-    State J;
-    for(auto &it: I){
-        string a = symbol_after_dot(it, prods);
-        if(!a.empty() && a==X){
-            J.push_back({it.prod, it.dot+1});
+// calcula goto(estado, simbolo): novo estado ao processar simbolo
+// move o ponto sobre o simbolo em todos os items relevantes
+Estado calcular_goto(const Estado &estado_atual, const string &simbolo, 
+                     const vector<Producao> &producoes, const set<string> &nao_terminais){
+    Estado novo_conjunto;
+    
+    for(auto &item: estado_atual){
+        string simb_apos = simbolo_apos_ponto(item, producoes);
+        if(!simb_apos.empty() && simb_apos == simbolo){
+            // move o ponto uma posicao a frente
+            novo_conjunto.push_back({item.indice_producao, item.posicao_ponto + 1});
         }
     }
-    return closure(J, prods, nonterminals);
+    
+    return calcular_fechamento(novo_conjunto, producoes, nao_terminais);
 }
 
-int state_index(const vector<State> &C, const State &S){
-    for(size_t i=0;i<C.size();++i){
-        if(C[i].size()!=S.size()) continue;
-        bool ok = true;
-        for(size_t j=0;j<S.size();++j) if(!(C[i][j]==S[j])) { ok=false; break; }
-        if(ok) return (int)i;
+// busca o indice de um estado na colecao, retorna -1 se nao encontrado
+int buscar_indice_estado(const vector<Estado> &colecao_estados, const Estado &estado_procurado){
+    for(size_t i=0; i<colecao_estados.size(); ++i){
+        if(colecao_estados[i].size() != estado_procurado.size()) continue;
+        
+        bool estados_iguais = true;
+        for(size_t j=0; j<estado_procurado.size(); ++j) {
+            if(!(colecao_estados[i][j] == estado_procurado[j])) { 
+                estados_iguais = false; 
+                break; 
+            }
+        }
+        
+        if(estados_iguais) return (int)i;
     }
     return -1;
 }
 
-struct Action { // either shift to state, reduce prod, accept, or error
-    enum Type {ERR, SHIFT, REDUCE, ACCEPT} type = ERR;
-    int val = -1; // state or production index
+// acao do analisador: shift, reduce, accept ou erro
+struct Acao {
+    enum Tipo {ERRO, SHIFT, REDUCE, ACCEPT} tipo = ERRO;
+    int valor = -1;  // numero do estado (shift) ou indice da producao (reduce)
 };
 
 int main(int argc, char **argv){
     if(argc < 3){
-        cerr<<"Usage: "<<argv[0]<<" <grammar-file> <input-tokens (quoted, space-separated)>\n";
-        cerr<<"Example: ./lr0_parser grammar.txt \"a a a\"\n";
+        cerr<<"uso: "<<argv[0]<<" <arquivo-gramatica> <tokens-entrada (entre aspas, separados por espaco)>\n";
+        cerr<<"exemplo: ./lr0_parser grammar.txt \"a a a\"\n";
         return 1;
     }
-    string grammarFile = argv[1];
-    string inputStr;
-    // join remaining argv into tokens string
-    for(int i=2;i<argc;++i){ if(i>2) inputStr += " "; inputStr += argv[i]; }
+    
+    string arquivo_gramatica = argv[1];
+    string entrada_string;
+    
+    // junta os argumentos restantes em uma string de tokens
+    for(int i=2; i<argc; ++i){ 
+        if(i>2) entrada_string += " "; 
+        entrada_string += argv[i]; 
+    }
 
-    set<string> nonterminals, terminals;
-    vector<Production> prods = read_grammar(grammarFile, nonterminals, terminals);
-    if(prods.empty()) { cerr<<"No productions read\n"; return 1; }
+    set<string> nao_terminais, terminais;
+    vector<Producao> producoes = ler_gramatica(arquivo_gramatica, nao_terminais, terminais);
+    if(producoes.empty()) { 
+        cerr<<"nenhuma producao lida\n"; 
+        return 1; 
+    }
 
-    // augment grammar: S' -> S (S is first production's LHS)
-    string S0 = prods[0].lhs;
-    Production aug; aug.lhs = S0 + "'"; aug.rhs = {S0};
-    prods.insert(prods.begin(), aug);
-    nonterminals.insert(aug.lhs);
+    // aumenta a gramatica: S' -> S (S e o nao-terminal da primeira producao)
+    string simbolo_inicial = producoes[0].lado_esquerdo;
+    Producao prod_aumentada;
+    prod_aumentada.lado_esquerdo = simbolo_inicial + "'";
+    prod_aumentada.lado_direito = {simbolo_inicial};
+    producoes.insert(producoes.begin(), prod_aumentada);
+    nao_terminais.insert(prod_aumentada.lado_esquerdo);
 
-    // recompute terminals (ensure $ present)
-    terminals.insert("$");
+    terminais.insert("$");
 
-    // build canonical collection
-    State I0; I0.push_back({0,0});
-    State c0 = closure(I0, prods, nonterminals);
-    vector<State> C; C.push_back(c0);
-    // symbol set: union of terminals and nonterminals except eps
-    set<string> symbols;
-    for(auto &t: terminals) symbols.insert(t);
-    for(auto &nt: nonterminals) symbols.insert(nt);
+    // constroi a colecao canonica de estados lr(0)
+    Estado estado_inicial;
+    estado_inicial.push_back({0, 0});  // [S' -> .S]
+    Estado fechamento_inicial = calcular_fechamento(estado_inicial, producoes, nao_terminais);
+    
+    vector<Estado> colecao_estados;
+    colecao_estados.push_back(fechamento_inicial);
+    
+    // conjunto de todos os simbolos da gramatica
+    set<string> simbolos_gramatica;
+    for(auto &term: terminais) simbolos_gramatica.insert(term);
+    for(auto &nao_term: nao_terminais) simbolos_gramatica.insert(nao_term);
 
-    bool changed = true;
-    while(changed){
-        changed = false;
-        for(size_t i=0;i<C.size();++i){
-            // for each grammar symbol X
-            set<string> nextSymbols;
-            for(auto &it: C[i]){
-                string a = symbol_after_dot(it, prods);
-                if(!a.empty()) nextSymbols.insert(a);
+    // algoritmo para construir todos os estados
+    bool houve_mudanca = true;
+    while(houve_mudanca){
+        houve_mudanca = false;
+        
+        for(size_t i=0; i<colecao_estados.size(); ++i){
+            // coleta simbolos que aparecem apos o ponto neste estado
+            set<string> simbolos_possiveis;
+            for(auto &item: colecao_estados[i]){
+                string simb = simbolo_apos_ponto(item, producoes);
+                if(!simb.empty()) simbolos_possiveis.insert(simb);
             }
-            for(auto &X: nextSymbols){
-                State g = go_to(C[i], X, prods, nonterminals);
-                if(g.empty()) continue;
-                if(state_index(C, g) == -1){ C.push_back(g); changed = true; }
+            
+            // para cada simbolo, calcula goto e adiciona novo estado se necessario
+            for(auto &simbolo: simbolos_possiveis){
+                Estado novo_estado = calcular_goto(colecao_estados[i], simbolo, producoes, nao_terminais);
+                if(novo_estado.empty()) continue;
+                
+                if(buscar_indice_estado(colecao_estados, novo_estado) == -1){ 
+                    colecao_estados.push_back(novo_estado); 
+                    houve_mudanca = true; 
+                }
             }
         }
     }
 
-    // build ACTION and GOTO tables
-    int N = (int)C.size();
-    // Action: vector<map<terminal,Action>>; Goto: vector<map<nonterminal,int>>
-    vector<unordered_map<string,Action>> ACTION(N);
-    vector<unordered_map<string,int>> GOTO(N);
+    // constroi as tabelas ACTION e GOTO
+    int num_estados = (int)colecao_estados.size();
+    
+    // tabela ACTION: mapeamento (estado, terminal) -> acao
+    vector<unordered_map<string, Acao>> tabela_action(num_estados);
+    // tabela GOTO: mapeamento (estado, nao-terminal) -> proximo estado
+    vector<unordered_map<string, int>> tabela_goto(num_estados);
 
-    for(int i=0;i<N;++i){
-        for(auto &it: C[i]){
-            if(!is_dot_at_end(it, prods)){
-                string a = symbol_after_dot(it, prods);
-                // if a terminal and goto(i,a)=j => ACTION[i][a]=shift j
-                State g = go_to(C[i], a, prods, nonterminals);
-                if(!g.empty()){
-                    int j = state_index(C, g);
-                    if(terminals.count(a)){
-                        Action act; act.type = Action::SHIFT; act.val = j;
-                        auto &cur = ACTION[i][a];
-                        if(cur.type==Action::ERR) cur = act;
-                        else if(cur.type!=act.type || cur.val!=act.val){
-                            // conflict: prefer SHIFT over REDUCE
-                            if(cur.type==Action::REDUCE && act.type==Action::SHIFT){ cur = act; }
-                            // otherwise keep existing (simple resolution)
+    for(int i=0; i<num_estados; ++i){
+        for(auto &item: colecao_estados[i]){
+            
+            if(!ponto_no_final(item, producoes)){
+                // caso 1: ponto nao esta no final - pode fazer shift
+                string simbolo = simbolo_apos_ponto(item, producoes);
+                Estado estado_destino = calcular_goto(colecao_estados[i], simbolo, producoes, nao_terminais);
+                
+                if(!estado_destino.empty()){
+                    int indice_destino = buscar_indice_estado(colecao_estados, estado_destino);
+                    
+                    if(terminais.count(simbolo)){
+                        // simbolo e terminal: adiciona shift
+                        Acao acao_shift;
+                        acao_shift.tipo = Acao::SHIFT;
+                        acao_shift.valor = indice_destino;
+                        
+                        auto &acao_atual = tabela_action[i][simbolo];
+                        if(acao_atual.tipo == Acao::ERRO) {
+                            acao_atual = acao_shift;
+                        } else if(acao_atual.tipo != acao_shift.tipo || acao_atual.valor != acao_shift.valor){
+                            // conflito: prefere shift sobre reduce
+                            if(acao_atual.tipo == Acao::REDUCE && acao_shift.tipo == Acao::SHIFT){ 
+                                acao_atual = acao_shift; 
+                            }
                         }
-                    } else if(nonterminals.count(a)){
-                        GOTO[i][a] = j;
+                    } else if(nao_terminais.count(simbolo)){
+                        // simbolo e nao-terminal: adiciona goto
+                        tabela_goto[i][simbolo] = indice_destino;
                     }
                 }
+                
             } else {
-                // dot at end: reduce by production it.prod (if prod != 0)
-                if(it.prod == 0){
-                    // augmented production S' -> S . => accept on $
-                    Action acc; acc.type = Action::ACCEPT; acc.val = -1;
-                    ACTION[i]["$"] = acc;
+                // caso 2: ponto no final - reduce ou accept
+                if(item.indice_producao == 0){
+                    // producao aumentada S' -> S . => accept no $
+                    Acao acao_accept;
+                    acao_accept.tipo = Acao::ACCEPT;
+                    acao_accept.valor = -1;
+                    tabela_action[i]["$"] = acao_accept;
+                    
                 } else {
-                    Action r; r.type = Action::REDUCE; r.val = it.prod;
-                    // for LR(0) naive: place reduce on all terminals (may cause conflicts)
-                    for(auto &t: terminals){
-                        auto &cur = ACTION[i][t];
-                        if(cur.type==Action::ERR) cur = r;
-                        else if(cur.type!=r.type || cur.val!=r.val){
-                            // conflict resolution: prefer SHIFT over REDUCE
-                            if(cur.type==Action::SHIFT) { /* keep shift */ }
-                            else if(cur.type==Action::REDUCE){
-                                // reduce/reduce: choose smallest production index
-                                if(r.val < cur.val) cur = r;
+                    // reduce por esta producao em todos os terminais (lr(0) simples)
+                    Acao acao_reduce;
+                    acao_reduce.tipo = Acao::REDUCE;
+                    acao_reduce.valor = item.indice_producao;
+                    
+                    for(auto &terminal: terminais){
+                        auto &acao_atual = tabela_action[i][terminal];
+                        
+                        if(acao_atual.tipo == Acao::ERRO) {
+                            acao_atual = acao_reduce;
+                        } else if(acao_atual.tipo != acao_reduce.tipo || acao_atual.valor != acao_reduce.valor){
+                            // resolucao de conflitos: shift tem prioridade sobre reduce
+                            if(acao_atual.tipo == Acao::SHIFT) { 
+                                // mantem shift
+                            } else if(acao_atual.tipo == Acao::REDUCE){
+                                // conflito reduce/reduce: escolhe producao com menor indice
+                                if(acao_reduce.valor < acao_atual.valor) 
+                                    acao_atual = acao_reduce;
                             }
                         }
                     }
@@ -256,108 +362,149 @@ int main(int argc, char **argv){
         }
     }
 
-    // show summary
-    cout<<"Grammar productions:\n";
-    for(size_t i=0;i<prods.size();++i){
-        cout<<"  "<<i<<": "<<prods[i].lhs<<" -> ";
-        if(prods[i].rhs.empty()) cout<<"eps";
-        else cout<<join(prods[i].rhs);
+    // exibe resumo da gramatica e automato
+    cout<<"producoes da gramatica:\n";
+    for(size_t i=0; i<producoes.size(); ++i){
+        cout<<"  "<<i<<": "<<producoes[i].lado_esquerdo<<" -> ";
+        if(producoes[i].lado_direito.empty()) 
+            cout<<"eps";
+        else 
+            cout<<juntar_strings(producoes[i].lado_direito);
         cout<<"\n";
     }
-    cout<<"\nStates ("<<N<<"):\n";
-    for(int i=0;i<N;++i){
+    
+    cout<<"\nestados ("<<num_estados<<"):\n";
+    for(int i=0; i<num_estados; ++i){
         cout<<"I"<<i<<":\n";
-        for(auto &it: C[i]){
-            cout<<"  ["<<it.prod<<"] "<<prods[it.prod].lhs<<" -> ";
-            for(int k=0;k<(int)prods[it.prod].rhs.size();++k){
-                if(k==it.dot) cout<<". ";
-                cout<<prods[it.prod].rhs[k]<<" ";
+        for(auto &item: colecao_estados[i]){
+            cout<<"  ["<<item.indice_producao<<"] "<<producoes[item.indice_producao].lado_esquerdo<<" -> ";
+            
+            // exibe o lado direito com o ponto na posicao correta
+            for(int k=0; k<(int)producoes[item.indice_producao].lado_direito.size(); ++k){
+                if(k == item.posicao_ponto) cout<<". ";
+                cout<<producoes[item.indice_producao].lado_direito[k]<<" ";
             }
-            if(it.dot == (int)prods[it.prod].rhs.size()) cout<<". ";
+            if(item.posicao_ponto == (int)producoes[item.indice_producao].lado_direito.size()) 
+                cout<<". ";
             cout<<"\n";
         }
         cout<<"\n";
     }
 
-    // print ACTION table (terminals)
-    cout<<"ACTION table (terminals):\n";
-    // collect list of terminals sorted
-    vector<string> termList(terminals.begin(), terminals.end());
-    sort(termList.begin(), termList.end());
-    cout<<"state";
-    for(auto &t: termList) cout<<"\t"<<t;
+    // exibe tabela ACTION (terminais)
+    cout<<"tabela ACTION (terminais):\n";
+    vector<string> lista_terminais(terminais.begin(), terminais.end());
+    sort(lista_terminais.begin(), lista_terminais.end());
+    
+    cout<<"estado";
+    for(auto &term: lista_terminais) cout<<"\t"<<term;
     cout<<"\n";
-    for(int i=0;i<N;++i){
+    
+    for(int i=0; i<num_estados; ++i){
         cout<<i;
-        for(auto &t: termList){
+        for(auto &term: lista_terminais){
             cout<<"\t";
-            auto it = ACTION[i].find(t);
-            if(it==ACTION[i].end()) cout<<".";
-            else {
-                auto a = it->second;
-                if(a.type==Action::SHIFT) cout<<"s"<<a.val;
-                else if(a.type==Action::REDUCE) cout<<"r"<<a.val;
-                else if(a.type==Action::ACCEPT) cout<<"acc";
-                else cout<<".";
+            auto busca = tabela_action[i].find(term);
+            
+            if(busca == tabela_action[i].end()) {
+                cout<<".";
+            } else {
+                auto acao = busca->second;
+                if(acao.tipo == Acao::SHIFT) 
+                    cout<<"s"<<acao.valor;
+                else if(acao.tipo == Acao::REDUCE) 
+                    cout<<"r"<<acao.valor;
+                else if(acao.tipo == Acao::ACCEPT) 
+                    cout<<"acc";
+                else 
+                    cout<<".";
             }
         }
         cout<<"\n";
     }
-    cout<<"\nGOTO table (nonterminals):\n";
-    vector<string> ntList(nonterminals.begin(), nonterminals.end());
-    sort(ntList.begin(), ntList.end());
-    cout<<"state";
-    for(auto &nt: ntList) cout<<"\t"<<nt;
+    cout<<"\ntabela GOTO (nao-terminais):\n";
+    vector<string> lista_nao_terminais(nao_terminais.begin(), nao_terminais.end());
+    sort(lista_nao_terminais.begin(), lista_nao_terminais.end());
+    
+    cout<<"estado";
+    for(auto &nao_term: lista_nao_terminais) cout<<"\t"<<nao_term;
     cout<<"\n";
-    for(int i=0;i<N;++i){
+    
+    for(int i=0; i<num_estados; ++i){
         cout<<i;
-        for(auto &nt: ntList){
+        for(auto &nao_term: lista_nao_terminais){
             cout<<"\t";
-            auto it = GOTO[i].find(nt);
-            if(it==GOTO[i].end()) cout<<"."; else cout<<it->second;
+            auto busca = tabela_goto[i].find(nao_term);
+            if(busca == tabela_goto[i].end()) 
+                cout<<"."; 
+            else 
+                cout<<busca->second;
         }
         cout<<"\n";
     }
 
-    // Parse input tokens
-    // split inputStr by spaces
-    vector<string> inputTokens;
+    // analisa a entrada
+    vector<string> tokens_entrada;
     {
-        stringstream s(inputStr);
-        string tok;
-        while(s >> tok) inputTokens.push_back(tok);
+        stringstream stream(entrada_string);
+        string token;
+        while(stream >> token) tokens_entrada.push_back(token);
     }
-    inputTokens.push_back("$");
+    tokens_entrada.push_back("$");  // adiciona marcador de fim de entrada
 
-    cout<<"\nParsing input: "<<join(inputTokens)<<"\n\n";
-    // stack of states
-    vector<int> stackStates; stackStates.push_back(0);
-    size_t ip = 0;
+    cout<<"\nanalisando entrada: "<<juntar_strings(tokens_entrada)<<"\n\n";
+    
+    // pilha de estados do analisador
+    vector<int> pilha_estados;
+    pilha_estados.push_back(0);  // estado inicial
+    size_t indice_entrada = 0;
+    
     while(true){
-        int s = stackStates.back();
-        string a = inputTokens[ip];
-        Action act = ACTION[s].count(a) ? ACTION[s][a] : Action();
-        if(act.type==Action::SHIFT){
-            cout<<"shift '"<<a<<"' -> state "<<act.val<<"\n";
-            stackStates.push_back(act.val);
-            ip++;
-        } else if(act.type==Action::REDUCE){
-            auto &p = prods[act.val];
-            cout<<"reduce by "<<act.val<<": "<<p.lhs<<" -> ";
-            if(p.rhs.empty()) cout<<"eps"; else cout<<join(p.rhs);
+        int estado_topo = pilha_estados.back();
+        string token_atual = tokens_entrada[indice_entrada];
+        
+        // consulta tabela ACTION
+        Acao acao = tabela_action[estado_topo].count(token_atual) ? 
+                    tabela_action[estado_topo][token_atual] : Acao();
+        
+        if(acao.tipo == Acao::SHIFT){
+            // shift: empilha novo estado e avanca na entrada
+            cout<<"shift '"<<token_atual<<"' -> estado "<<acao.valor<<"\n";
+            pilha_estados.push_back(acao.valor);
+            indice_entrada++;
+            
+        } else if(acao.tipo == Acao::REDUCE){
+            // reduce: aplica producao
+            auto &prod = producoes[acao.valor];
+            cout<<"reduce pela producao "<<acao.valor<<": "<<prod.lado_esquerdo<<" -> ";
+            if(prod.lado_direito.empty()) 
+                cout<<"eps"; 
+            else 
+                cout<<juntar_strings(prod.lado_direito);
             cout<<"\n";
-            int m = (int)p.rhs.size();
-            for(int k=0;k<m;++k) stackStates.pop_back();
-            int t = stackStates.back();
-            if(GOTO[t].count(p.lhs)==0){ cerr<<"Error: no GOTO for state "<<t<<" and nonterminal "<<p.lhs<<"\n"; return 1; }
-            int g = GOTO[t][p.lhs];
-            stackStates.push_back(g);
-            cout<<"goto state "<<g<<"\n";
-        } else if(act.type==Action::ACCEPT){
-            cout<<"Input accepted (ACCEPT)\n";
+            
+            // desempilha estados (um para cada simbolo do lado direito)
+            int tamanho_lado_direito = (int)prod.lado_direito.size();
+            for(int k=0; k<tamanho_lado_direito; ++k) 
+                pilha_estados.pop_back();
+            
+            // consulta tabela GOTO
+            int estado_anterior = pilha_estados.back();
+            if(tabela_goto[estado_anterior].count(prod.lado_esquerdo) == 0){ 
+                cerr<<"erro: sem GOTO para estado "<<estado_anterior
+                    <<" e nao-terminal "<<prod.lado_esquerdo<<"\n"; 
+                return 1; 
+            }
+            int proximo_estado = tabela_goto[estado_anterior][prod.lado_esquerdo];
+            pilha_estados.push_back(proximo_estado);
+            cout<<"goto estado "<<proximo_estado<<"\n";
+            
+        } else if(acao.tipo == Acao::ACCEPT){
+            cout<<"entrada aceita (ACCEPT)\n";
             break;
+            
         } else {
-            cerr<<"Parse error at token '"<<a<<"' (state "<<s<<")\n";
+            cerr<<"erro de analise no token '"<<token_atual<<"' (estado "<<estado_topo<<")\n";
             return 1;
         }
     }

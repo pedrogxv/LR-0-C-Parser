@@ -43,8 +43,3 @@ Para teste de validação foi utilizada a execução abaixo:
 ```
 ./lr0_parser grammar.txt "c a c"
 ```
-
-
-Notes:
-- This is a teaching implementation for LR(0). Some grammars are not LR(0) and will produce conflicts.
-- Conflict resolution is naive: shift preferred over redu- The program prints states, ACTION and GOTO tables, and a trace of parsing steps.
